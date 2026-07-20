@@ -156,6 +156,12 @@ impl ChatPanel {
             prev,
             TurnPhase::Completed | TurnPhase::Error(_)
         );
+        
+        let new_turn_started = matches!(current, TurnPhase::Streaming) 
+            && matches!(prev, TurnPhase::Completed | TurnPhase::Error(_));
+        if new_turn_started {
+            self.message_count = 0;
+        }
 
         self.prev_phase = current.clone();
 
@@ -204,208 +210,12 @@ impl ChatPanel {
             self.drained_this_turn = false;
         }
 
-        // Build and flush structured message entries from TurnState when the turn
-        // completes. This produces multi-block output: reasoning (if present),
-        // assistant response with tool indicators, and tool result blocks.
-        //
-        // Guard against repeated flushes: we only enter this block on the
-        // transition into a settled state (prev=Streaming, current=Completed).
-        // Once `prev` is set to Completed, steady-state draws hit
-        // `transitioning = false` and won't fire again.
-        // Flush when transitioning FROM Streaming into a settled state only.
-        // Completed must not be included here — it would re-flush on the first
-        // completed draw of a subsequent turn, duplicating all prior text.
-        let was_streaming = matches!(prev, TurnPhase::Streaming);
-        if was_streaming && settled && transitioning {
-            if let Some(ref arc) = self.message_state.turn_state_ref {
-                let mut ts = arc.lock();
-                let text = ts.streaming_text.clone();
-                let reasoning_text = ts.reasoning_text.clone();
-                let completed_tools: Vec<_> = ts.completed_tools.iter().cloned().collect();
-                // Capture error phase before dropping lock
-                let error_msg_for_render: Option<String> = match &ts.phase {
-                    TurnPhase::Error(ref e) if !e.trim().is_empty() => Some(e.clone()),
-                    _ => None,
-                };
-                // Consume all fields — TUI flushes them exactly once
-                ts.streaming_text.clear();
-                ts.reasoning_text.clear();
-                ts.completed_tools.clear();
-                drop(ts);
+        // Clear subagent data during draw cycle
+        self.shared_state_ref.try_lock().map(|guard| {
+            guard.clear_subagents();
+        });
 
-                let mut error_msg: Option<&str> = None;
-                if text.is_empty()
-                    && reasoning_text.is_empty()
-                    && completed_tools.is_empty()
-                {
-                    // Check if there's an error message to render
-                    if let Some(ref error_text) = error_msg_for_render {
-                        error_msg = Some(error_text.as_str());
-                    }
-                    // Still proceed if there are subagers to flush/render
-                    if error_msg.is_none() {
-                        let has_subagers = self
-                            .shared_state_ref
-                            .try_lock()
-                            .map(|guard| !guard.get_subagents().is_empty())
-                            .unwrap_or(false);
-                        if !has_subagers {
-                            return;
-                        }
-                    }
-                }
-
-                let mut new_entries: Vec<MessageRenderEntry> = Vec::new();
-                let palette = self.renderer.current_palette();
-
-                // 1. Reasoning block (shown FIRST)
-                if !reasoning_text.is_empty() {
-                    let reasoning_lines: Vec<StyledLine> = reasoning_text
-                        .lines()
-                        .filter(|l| !l.trim().is_empty())
-                        .map(|line| StyledLine {
-                            content: Line::styled(
-                                line.to_string(),
-                                Style::default()
-                                    .fg(palette.muted)
-                                    .add_modifier(Modifier::DIM),
-                            ),
-                            role_color: None,
-                        })
-                        .collect();
-                    if !reasoning_lines.is_empty() {
-                        new_entries.push(MessageRenderEntry {
-                            role: oben_models::MessageRole::Assistant,
-                            is_tool_result: false,
-                            body_lines: reasoning_lines,
-                            tool_calls: Vec::new(),
-                            reasoning: Some(reasoning_text.clone()),
-                            title: Some(Line::from(vec![
-                                Span::styled(
-                                    "  🤔 Thought",
-                                    Style::default()
-                                        .fg(palette.muted)
-                                        .add_modifier(Modifier::BOLD | Modifier::DIM),
-                                ),
-                            ])),
-                        });
-                    }
-                }
-
-                // 1.5 Error message (if turn failed)
-                if let Some(ref error_text) = error_msg {
-                    let mut error_lines: Vec<StyledLine> = Vec::new();
-                    for line in error_text.lines().filter(|l| !l.trim().is_empty()) {
-                        error_lines.push(StyledLine {
-                            content: Line::styled(
-                                line.to_string(),
-                                Style::default()
-                                    .fg(Color::Red)
-                                    .add_modifier(Modifier::DIM),
-                            ),
-                            role_color: None,
-                        });
-                    }
-                    if !error_lines.is_empty() {
-                        new_entries.push(MessageRenderEntry {
-                            role: oben_models::MessageRole::Assistant,
-                            is_tool_result: false,
-                            body_lines: error_lines,
-                            tool_calls: Vec::new(),
-                            reasoning: None,
-                            title: Some(Line::from(vec![Span::styled(
-                                "  ⚠ Error",
-                                Style::default()
-                                    .fg(Color::Red)
-                                    .add_modifier(Modifier::BOLD | Modifier::DIM),
-                            )])),
-                        });
-                    }
-                }
-
-                // 2. Main response
-                if !text.is_empty() {
-                    let mut body_lines = render_body_lines(&text, &palette);
-
-                    if !completed_tools.is_empty() {
-                        // Blank separator line
-                        body_lines.push(StyledLine {
-                            content: Line::raw(""),
-                            role_color: None,
-                        });
-                        body_lines.push(StyledLine {
-                            content: Line::styled(
-                                "── Tools ──",
-                                Style::default()
-                                    .fg(palette.info)
-                                    .add_modifier(Modifier::DIM | Modifier::BOLD),
-                            ),
-                            role_color: None,
-                        });
-                        for ct in &completed_tools {
-                            let preview = if ct.output_preview.chars().count() > 80 {
-                                format!(
-                                    "{}...",
-                                    ct.output_preview.chars().take(80).collect::<String>()
-                                )
-                            } else {
-                                ct.output_preview.clone()
-                            };
-                            let trail = format!(
-                                "● {} {} {}",
-                                tool_name_to_title_case(&ct.name),
-                                if ct.has_error { "\u{2717}" } else { "\u{2713}" },
-                                preview,
-                            );
-                            body_lines.push(StyledLine {
-                                content: Line::styled(trail, Style::default().fg(palette.muted)),
-                                role_color: None,
-                            });
-                        }
-                    }
-
-                    new_entries.push(MessageRenderEntry {
-                        role: oben_models::MessageRole::Assistant,
-                        body_lines,
-                        is_tool_result: false,
-                        tool_calls: Vec::new(),
-                        reasoning: None,
-                        title: None,
-                    });
-                    tracing::info!(
-                        "[chat_panel] flushed streaming_text to entries: len={}, tools={}",
-                        text.len(),
-                        completed_tools.len(),
-                    );
-                }
-
-                // 3. Commit all entries at once
-                if !new_entries.is_empty() {
-                    let entry_count = new_entries.len();
-                    self.message_state
-                        .message_entries
-                        .lock()
-                        .unwrap()
-                        .extend(new_entries);
-                    tracing::info!(
-                        "[chat_panel] flushed {} structured entries",
-                        entry_count
-                    );
-                }
-
-                // Clear subagent panel data — turn completed, subager info
-                // incorporated into messages. Prevents stale entries
-                // persisting forever across turns.
-                self.shared_state_ref.try_lock().map(|guard| {
-                    guard.clear_subagents();
-                });
-            }
-        }
-
-        // Only update streaming flag on phase transition to avoid overriding
-        // the StartTurn flag before the LLM actually starts streaming.
-        // prev can be Idle (first turn) or Completed (subsequent turns)
-        // since on_completed() sets phase=Completed rather than Idle.
+        // Update streaming flag on phase transition
         let is_entering_streaming = matches!(current, TurnPhase::Streaming)
             && (matches!(prev, TurnPhase::Idle)
                 || matches!(prev, TurnPhase::Completed)
@@ -451,12 +261,10 @@ impl ChatPanel {
 
     /// Clear all messages from the display and reset the message count.
     pub fn clear_display(&mut self) {
+        let entries_before = self.message_state.message_entries.lock().unwrap().len();
         self.message_state.message_entries.lock().unwrap().clear();
-        self.message_state
-            .scroll_to_bottom
-            .store(true, Ordering::SeqCst);
-        self.message_count = 0;
-        self.session_name = None;
+        let entries_after = self.message_state.message_entries.lock().unwrap().len();
+        tracing::debug!("[chat_panel] clear_display: entries_before={} -> after={} (should be 0)", entries_before, entries_after);
     }
 
     /// Render the input bar widget.

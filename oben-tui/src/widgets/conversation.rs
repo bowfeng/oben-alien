@@ -1094,23 +1094,29 @@ impl ConversationWidget {
         scroll_pos = state.scroll_pos.load(Ordering::SeqCst);
         let final_pos = scroll_pos;
 
-        tracing::info!(
-            "[scroll_update] BEFORE: total_height={} inner_height={} scrollable_range={} prev_scrollable_range={} scroll_pos={} vp_bottom={} lines_from_bottom={} scroll_to_bottom={}",
-            total_height, inner_height, scrollable_range, prev_scrollable_range, scroll_pos, vp_bottom,
-            lines_from_bottom, state.scroll_to_bottom.load(Ordering::SeqCst)
-        );
+        // Log scroll updates only every 10th time to reduce verbosity
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SCROLL_LOG_COUNTER: AtomicUsize = AtomicUsize::new(0);
+        
+        if SCROLL_LOG_COUNTER.fetch_add(1, Ordering::SeqCst) % 10 == 0 {
+            tracing::info!(
+                "[scroll_update] BEFORE: total_height={} inner_height={} scrollable_range={} prev_scrollable_range={} scroll_pos={} vp_bottom={} lines_from_bottom={} scroll_to_bottom={}",
+                total_height, inner_height, scrollable_range, prev_scrollable_range, scroll_pos, vp_bottom,
+                lines_from_bottom, state.scroll_to_bottom.load(Ordering::SeqCst)
+            );
 
-        tracing::info!(
-            "[scroll_update] AFTER: final_pos={} new_vp_bottom={} scroll_to_bottom={}",
-            final_pos,
-            final_pos.saturating_add(inner_height as usize),
-            state.scroll_to_bottom.load(Ordering::SeqCst)
-        );
+            tracing::info!(
+                "[scroll_update] AFTER: final_pos={} new_vp_bottom={} scroll_to_bottom={}",
+                final_pos,
+                final_pos.saturating_add(inner_height as usize),
+                state.scroll_to_bottom.load(Ordering::SeqCst)
+            );
 
-        tracing::info!(
-            "[scroll_update] AFTER: final_pos={} scrollable_range={} vp_bottom={} scroll_to_bottom={}",
-            final_pos, scrollable_range, final_pos.saturating_add(inner_height as usize), state.scroll_to_bottom.load(Ordering::SeqCst)
-        );
+            tracing::info!(
+                "[scroll_update] AFTER: final_pos={} scrollable_range={} vp_bottom={} scroll_to_bottom={}",
+                final_pos, scrollable_range, final_pos.saturating_add(inner_height as usize), state.scroll_to_bottom.load(Ordering::SeqCst)
+            );
+        }
         {
             let mut scroll_state = state.scroll_state.lock().unwrap();
             *scroll_state = ScrollbarState::new(total_height.max(1) as usize)
@@ -1135,11 +1141,12 @@ impl ConversationWidget {
 
     /// Append a user message to the internal display state.
     pub fn append_user_message(&mut self, state: &mut ConversationState, text: &str) {
+        let mut entries = state.message_entries.lock().unwrap();
         let body_lines = vec![crate::widgets::message_renderer::StyledLine {
             content: Line::from(text.to_string()),
             role_color: None,
         }];
-        state.message_entries.lock().unwrap().push(
+        entries.push(
             crate::widgets::message_renderer::MessageRenderEntry {
                 role: oben_models::MessageRole::User,
                 body_lines,

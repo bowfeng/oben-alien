@@ -343,10 +343,19 @@ pub async fn run_tui(session_name: Option<&str>, agent_name: Option<&str>) -> Re
                 let mut app = arc_app.lock().await;
                 match cmd {
                     TuiCommand::StartTurn { input, session_name: _ } => {
-                        tracing::info!("[event_loop] TuiCommand::StartTurn, input.len()={}", input.len());
+                        tracing::info!("[event_loop] TuiCommand::StartTurn, input.len={}, active_panel={:?}", input.len(), app.active_panel);
                         if let Some(chat) = app.get_chat_mut() {
+                            let entries_before = chat.message_state.message_entries.lock().unwrap().len();
+                            tracing::debug!("[event_loop] Clearing entries before: {}", entries_before);
                             chat.streaming = true;
+                            chat.clear_display();
+                            let entries_after_clear = chat.message_state.message_entries.lock().unwrap().len();
+                            tracing::debug!("[event_loop] After clear_display: {}", entries_after_clear);
                             chat.append_user_message(&input);
+                            let count = chat.message_state.message_entries.lock().unwrap().len();
+                            tracing::info!("[event_loop] After StartTurn, message_entries count={}", count);
+                        } else {
+                            tracing::error!("[event_loop] StartTurn: no chat panel found!");
                         }
                         app.status = "Busy".into();
                         app.needs_redraw = true;
@@ -360,6 +369,7 @@ pub async fn run_tui(session_name: Option<&str>, agent_name: Option<&str>) -> Re
             }
             completion = done_rx.recv() => {
                 if let Some(completion) = completion {
+                    tracing::debug!("[event_loop] done_rx: channel received");
                     tracing::info!(
                         "[event_loop] done_rx: success={} session_name={}",
                         completion.success,
@@ -369,9 +379,31 @@ pub async fn run_tui(session_name: Option<&str>, agent_name: Option<&str>) -> Re
                     // Refresh session_id from agent's CWM — sessions are created
                     // lazily on first turn, so the init-time capture may be None.
                     app.shared_state.lock().sync_session_id().await;
+                    
+                    // Reload messages from session to overwrite streaming entries
+                    let messages = {
+                        let ss = app.shared_state.lock();
+                        if let Some(ref agent) = ss.agent {
+                            let sid = ss.session_id.clone();
+                            if let Some(ref sid_val) = sid {
+                                let agent_guard = agent.lock().await;
+                                let sm = agent_guard.session_manager();
+                                let sm_guard = sm.lock().await;
+                                sm_guard.session(sid_val)
+                                    .map(|s| s.messages.clone())
+                                    .unwrap_or_default()
+                            } else {
+                                Vec::new()
+                            }
+                        } else {
+                            Vec::new()
+                        }
+                    };
+                    
                     if let Some(chat) = app.get_chat_mut() {
                         chat.streaming = false;
                         chat.message_count = completion.message_count;
+                        chat.update_from_messages(&messages, completion.session_name.clone());
                         // Also set session_name so ChatPanel state matches TurnCompletion.
                         if let Some(ref name) = completion.session_name {
                             chat.session_name = Some(name.clone());
@@ -604,6 +636,8 @@ pub async fn run_tui(session_name: Option<&str>, agent_name: Option<&str>) -> Re
                         if let Some(chat) = arc_app.lock().await.get_chat_mut() {
                             if chat.input.pending_steer_count == 0 {
                                 chat.append_user_message(&text);
+                                let count = chat.message_state.message_entries.lock().unwrap().len();
+                                tracing::info!("[event_loop] After steer append_user_message, message_entries count={}", count);
                                 chat.input.pending_steer_count += 1;
                             }
                         }
