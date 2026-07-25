@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use tracing::info;
 
 use crate::context::ContextWindowManager;
 use crate::hooks::HookEngine;
@@ -84,6 +85,7 @@ pub async fn execute_turn_full(
     hooks: Option<Arc<HookEngine>>,
     interrupt: Option<SharedInterrupt>,
 ) -> Result<String> {
+    info!("execute_turn_full: starting with session_id={}", session_id);
     let turn_config = crate::turn_executor::TurnConfig {
         retry_config: conversation_config.retry_config.clone(),
         hooks,
@@ -107,7 +109,9 @@ pub async fn execute_turn_full(
         max_iterations: conversation_config.max_iterations,
         memory_context: conversation_config.memory_context.clone(),
     };
+    info!("execute_turn_full: Build turn_config");
 
+    info!("execute_turn_full: calling TurnExecutor::execute_turn_with_config");
     let result = TurnExecutor::execute_turn_with_config(
         context_window_manager,
         transport,
@@ -121,6 +125,7 @@ pub async fn execute_turn_full(
         turn_config,
     )
     .await?;
+    info!("execute_turn_full: returned result with text=\"{}\"", result.text);
 
     // Note: interrupt parameter was removed — interrupt handling moved to the
     // concrete coordinators (CliCoordinator/TuiCoordinator) via the new flow.

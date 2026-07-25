@@ -36,6 +36,9 @@ pub enum Commands {
         /// Search provider to use: duckduckgo, brave, bing, google
         #[arg(long)]
         search_provider: Option<String>,
+        /// Agent name for session isolation
+        #[arg(long)]
+        agent: Option<String>,
     },
     /// Run a one-shot prompt
     Run {
@@ -48,6 +51,9 @@ pub enum Commands {
         /// Search provider to use: duckduckgo, brave, bing, google
         #[arg(long)]
         search_provider: Option<String>,
+        /// Agent name for session isolation
+        #[arg(long)]
+        agent: Option<String>,
     },
     /// Setup/configure the agent
     Setup,

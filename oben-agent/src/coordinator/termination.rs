@@ -7,9 +7,10 @@
 /// `execute_turn_with_config` in `turn_executor.rs` uses these as a two-phase
 /// decision pipeline: first termination, then remedy.
 use anyhow::Result;
+use tracing::info;
 
 // Config import intentionally unused — max_iterations comes from the caller.
-use oben_models::{Message, MessageRole, TransportResponse};
+use oben_models::{Message, MessageContent, MessageRole, TransportResponse};
 
 // =========================================================================
 // TurnTerminationPolicy (phase 1: response evaluation)
@@ -53,17 +54,37 @@ impl Default for DefaultTurnTerminationPolicy {
 
 impl TurnTerminationPolicy for DefaultTurnTerminationPolicy {
     fn evaluate(&self, ctx: &TurnTerminationContext<'_>) -> Result<TurnTerminationDecision> {
+        info!("Policy: evaluating with tool_calls={:?}, messages.len={}", ctx.response.tool_calls, ctx.messages.len());
+        
+        // If there are tool errors in messages, always return last tool result
+        // to prevent LLM from generating text that ignores tool failures
+        let has_tool_errors = ctx.messages.iter().any(|m| m.tool_error);
+        info!("Policy: has_tool_errors={}", has_tool_errors);
+        if has_tool_errors {
+            info!("Policy: returning ReturnLastToolResult due to tool errors");
+            return Ok(TurnTerminationDecision::ReturnLastToolResult);
+        }
+        
         if !ctx.response.tool_calls.is_empty() {
+            info!("Policy: LLM wants to call more tools");
             return Ok(TurnTerminationDecision::Continue);
         }
+        
         let text = ctx.response.text.trim().to_string();
+        info!("Policy: response text=\"{}\" length={}", text, text.len());
+        info!("Policy: response.tool_calls={:?}", ctx.response.tool_calls);
         if text.is_empty() {
-            if ctx.messages.iter().any(|m| m.role == MessageRole::Tool) {
+            let has_tool_messages = ctx.messages.iter().any(|m| m.role == MessageRole::Tool);
+            info!("Policy: empty response, has_tool_messages={}", has_tool_messages);
+            if has_tool_messages {
+                info!("Policy: returning ReturnLastToolResult due to empty response with tool messages");
                 Ok(TurnTerminationDecision::ReturnLastToolResult)
             } else {
+                info!("Policy: returning empty response (no tools involved)");
                 Ok(TurnTerminationDecision::Return(String::new()))
             }
         } else {
+            info!("Policy: returning normal response");
             Ok(TurnTerminationDecision::Return(text))
         }
     }
@@ -171,6 +192,61 @@ impl TurnRemedyPolicy for BudgetRemedyPolicy {
     }
 }
 
+pub struct ToolFailureRemedyPolicy {
+    max_consecutive_failures: u32,
+    consecutive_failures: u32,
+}
+
+impl ToolFailureRemedyPolicy {
+    pub fn new(max_consecutive_failures: u32) -> Self {
+        Self {
+            max_consecutive_failures,
+            consecutive_failures: 0,
+        }
+    }
+
+    fn evaluate_inner(&mut self, _messages: &mut Vec<Message>) -> TurnRemedyAction {
+        // The tool failure guidance is now in system prompt, so we don't need to
+        // add retry hints to messages. Just track failures for the remedy decision.
+        self.consecutive_failures += 1;
+
+        if self.consecutive_failures < self.max_consecutive_failures {
+            TurnRemedyAction::Remedy
+        } else {
+            TurnRemedyAction::RemedyExhausted
+        }
+    }
+
+    fn is_tool_error(_text: &str, tool_error: bool) -> bool {
+        tool_error
+    }
+}
+
+impl Default for ToolFailureRemedyPolicy {
+    fn default() -> Self {
+        Self::new(3)
+    }
+}
+
+impl TurnRemedyPolicy for ToolFailureRemedyPolicy {
+    fn evaluate(&mut self, _max_calls: usize, messages: &mut Vec<Message>, _empty_count: u32) -> Result<TurnRemedyAction> {
+        let has_tool_errors = messages
+            .iter()
+            .any(|m| m.role == MessageRole::Tool && Self::is_tool_error(&m.content.to_text(), m.tool_error));
+        
+        info!("ToolFailureRemedyPolicy: has_tool_errors={}, messages.len={}", has_tool_errors, messages.len());
+        for (i, m) in messages.iter().enumerate() {
+            info!("  msg[{}]: role={:?} tool_error={}", i, m.role, m.tool_error);
+        }
+
+        if !has_tool_errors {
+            return Ok(TurnRemedyAction::Continue);
+        }
+
+        Ok(self.evaluate_inner(messages))
+    }
+}
+
 /// Empty response remedy — handles repeated empty LLM responses.
 /// Only activates when `empty_count > 0`.
 pub struct EmptyResponseRemedyPolicy {
@@ -232,6 +308,7 @@ impl TurnRemedyPolicy for TurnRemedyPolicyGroup {
     fn evaluate(&mut self, max_calls: usize, messages: &mut Vec<Message>, empty_count: u32) -> Result<TurnRemedyAction> {
         for policy in &mut self.policies {
             let action = policy.evaluate(max_calls, messages, empty_count)?;
+            info!("TurnRemedyPolicyGroup: policy returned {:?}", action);
             match action {
                 TurnRemedyAction::Continue => continue,
                 action => return Ok(action),
@@ -252,6 +329,7 @@ impl Default for DefaultTurnRemedyPolicy {
         Self {
             inner: TurnRemedyPolicyGroup::new()
                 .with_policy(Box::new(BudgetRemedyPolicy::new(100)))
+                .with_policy(Box::new(ToolFailureRemedyPolicy::default()))
                 .with_policy(Box::new(EmptyResponseRemedyPolicy::new(3))),
         }
     }
@@ -324,7 +402,7 @@ mod tests {
         let policy = DefaultTurnTerminationPolicy::default();
         let resp = mk_response("", vec![]);
         let msgs = [
-            Message { role: MessageRole::Tool, content: MessageContent::Text("tool output".into()), id: None, tool_call_ids: vec![], tool_calls: None, reasoning: None, delegation_id: None },
+            Message { role: MessageRole::Tool, content: MessageContent::Text("tool output".into()), id: None, tool_call_ids: vec![], tool_calls: None, reasoning: None, delegation_id: None, tool_error: false, include_in_prompt: true },
         ];
         let ctx = mk_ctx(&resp, &msgs);
         assert_eq!(policy.evaluate(&ctx).unwrap(), TurnTerminationDecision::ReturnLastToolResult);
@@ -431,5 +509,70 @@ mod tests {
         let mut messages = vec![];
         let action = policy.evaluate(50, &mut messages, 0).unwrap();
         assert_eq!(action, TurnRemedyAction::Continue);
+    }
+
+    #[test]
+    fn test_tool_failure_remedy_policy_tracking() {
+        let mut policy = ToolFailureRemedyPolicy::new(3);
+        
+        let tool_error_msg = Message {
+            role: MessageRole::Tool,
+            content: MessageContent::Text("tool failed".to_string()),
+            id: None,
+            tool_call_ids: vec![],
+            tool_calls: None,
+            reasoning: None,
+            delegation_id: None,
+            tool_error: true,
+            include_in_prompt: true,
+        };
+        
+        let mut messages = vec![tool_error_msg.clone()];
+        let action1 = policy.evaluate(0, &mut messages, 0).unwrap();
+        assert_eq!(action1, TurnRemedyAction::Remedy);
+        assert_eq!(policy.consecutive_failures, 1);
+
+        policy.consecutive_failures = 1;
+        let mut messages = vec![tool_error_msg.clone()];
+        let action2 = policy.evaluate(0, &mut messages, 0).unwrap();
+        assert_eq!(action2, TurnRemedyAction::Remedy);
+        assert_eq!(policy.consecutive_failures, 2);
+
+        policy.consecutive_failures = 2;
+        let mut messages = vec![tool_error_msg];
+        let action3 = policy.evaluate(0, &mut messages, 0).unwrap();
+        assert_eq!(action3, TurnRemedyAction::RemedyExhausted);
+        assert_eq!(policy.consecutive_failures, 3);
+    }
+
+    #[test]
+    fn test_tool_failure_remedy_policy_max_failures() {
+        let mut policy = ToolFailureRemedyPolicy::new(3);
+        
+        let tool_msg = Message {
+            role: MessageRole::Tool,
+            content: MessageContent::Text("web_search error".to_string()),
+            id: None,
+            tool_call_ids: vec![],
+            tool_calls: None,
+            reasoning: None,
+            delegation_id: None,
+            tool_error: true,
+            include_in_prompt: true,
+        };
+
+        let mut messages = vec![tool_msg.clone()];
+        let action1 = policy.evaluate(0, &mut messages, 0).unwrap();
+        assert_eq!(action1, TurnRemedyAction::Remedy);
+
+        policy.consecutive_failures = 1;
+        let mut messages2 = vec![tool_msg.clone()];
+        let action2 = policy.evaluate(0, &mut messages2, 0).unwrap();
+        assert_eq!(action2, TurnRemedyAction::Remedy);
+
+        policy.consecutive_failures = 2;
+        let mut messages3 = vec![tool_msg.clone()];
+        let action3 = policy.evaluate(0, &mut messages3, 0).unwrap();
+        assert_eq!(action3, TurnRemedyAction::RemedyExhausted);
     }
 }

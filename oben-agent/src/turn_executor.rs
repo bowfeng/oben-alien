@@ -9,8 +9,8 @@ use tracing::{info, debug};
 
 use crate::coordinator::termination::{
     BudgetRemedyPolicy, DefaultTurnTerminationPolicy, EmptyResponseRemedyPolicy,
-    TurnRemedyAction, TurnRemedyPolicy, TurnRemedyPolicyGroup, TurnTerminationDecision,
-    TurnTerminationPolicy, TurnTerminationPolicyGroup,
+    ToolFailureRemedyPolicy, TurnRemedyAction, TurnRemedyPolicy, TurnRemedyPolicyGroup,
+    TurnTerminationDecision, TurnTerminationPolicy, TurnTerminationPolicyGroup,
 };
 use crate::concurrent_dispatch::{self, ConcurrentDispatchConfig, PendingToolCall};
 use crate::context::{CompactStatus, ContextWindowManager};
@@ -67,6 +67,7 @@ pub enum TurnResultReason {
     Normal,
     ToolResult,
     BudgetExhausted,
+    Remedy,
 }
 
     // ---------------------------------------------------------------------------
@@ -109,6 +110,8 @@ impl TurnExecutor {
         let (mut session, current_session_id, mut turn_count) =
             Self::pre_turn_setup(context_window_manager, session_manager, session_id, user_message, &mut config)?;
         let mut consecutive_empty: u32 = 0;
+        let mut tool_call_count: usize = 0;
+        const MAX_TOOL_CALLS_PER_TURN: usize = 8;
         #[allow(unused_assignments)]
         let mut decision_result: Option<TurnResult> = None;
         'turn_loop: loop {
@@ -199,7 +202,11 @@ impl TurnExecutor {
                             .await?;
                         }
                         TurnRemedyAction::Remedy => {
-                            // Hint injected into messages, loop continues
+                            if session.messages.last().map(|m| m.role == MessageRole::Assistant).unwrap_or(false) {
+                                session.messages.pop();
+                            }
+                            let last = Self::last_tool_result_text(&session.messages).unwrap_or_default();
+                            decision_result = Some(TurnResult { text: last.to_string(), reason: TurnResultReason::Remedy, turn_count });
                         }
                         TurnRemedyAction::RemedyExhausted => {
                             let last = Self::last_tool_result_text(&session.messages).unwrap_or_default();
@@ -209,9 +216,17 @@ impl TurnExecutor {
                     }
                 }
                 TurnTerminationDecision::ReturnLastToolResult => {
-                    if let Some(last) = Self::last_tool_result_text(&session.messages) {
-                        decision_result = Some(TurnResult { text: last.to_string(), reason: TurnResultReason::ToolResult, turn_count });
-                        break;
+                    let remedy_action = rem.evaluate(config.max_iterations, &mut session.messages, consecutive_empty)?;
+                    match remedy_action {
+                        TurnRemedyAction::Remedy => continue,
+                        TurnRemedyAction::RemedyExhausted | TurnRemedyAction::Continue => {
+                            if let Some(last) = Self::last_tool_result_text(&session.messages) {
+                                decision_result = Some(TurnResult { text: last.to_string(), reason: TurnResultReason::ToolResult, turn_count });
+                                break;
+                            }
+                            decision_result = Some(TurnResult { text: String::new(), reason: TurnResultReason::ToolResult, turn_count });
+                            break;
+                        }
                     }
                 }
                 TurnTerminationDecision::Return(text) => {
@@ -256,6 +271,7 @@ impl TurnExecutor {
         // per turn is cheap — both constructors are simple struct initialization.
         TurnRemedyPolicyGroup::new()
             .with_policy(Box::new(BudgetRemedyPolicy::new(max_iterations)))
+            .with_policy(Box::new(ToolFailureRemedyPolicy::new(3)))
             .with_policy(Box::new(EmptyResponseRemedyPolicy::new(3)))
     }
 
@@ -543,7 +559,8 @@ impl TurnExecutor {
     }
 
     pub(crate) fn last_tool_result_text(messages: &[Message]) -> Option<&str> {
-        messages.last().and_then(|m| {
+        // Find the last Tool message (not necessarily the last message in the list)
+        messages.iter().rev().find_map(|m| {
             if m.role == MessageRole::Tool {
                 m.content.to_text_ref()
             } else {
@@ -620,7 +637,7 @@ impl TurnExecutor {
                 Message::tool_result(&call.call_id, &result.output)
                     .with_delegation_id(delegation_id.unwrap_or(0))
             } else if let Some(ref err) = result.error {
-                Message::tool_result(&call.call_id, err)
+                Message::tool_error_result(&call.call_id, err)
                     .with_delegation_id(delegation_id.unwrap_or(0))
             } else {
                 Message {
@@ -631,6 +648,8 @@ impl TurnExecutor {
                     tool_calls: None,
                     reasoning: None,
                     delegation_id,
+                    tool_error: result.error.is_some(),
+                    include_in_prompt: true,
                 }
             };
             session.messages.push(msg);

@@ -199,11 +199,8 @@ impl Hook for TuiTurnLifecycleAdapter {
 impl TurnLifecycleHooks for TuiTurnLifecycleAdapter {
     fn on_pre_turn(&self) {
         tracing::info!("[tui_turn] on_pre_turn: phase -> Streaming");
-        // Per-turn reset — mirroring the old behavior where emit_loop_start()
-        // was called inside the loop.  Sets phase to Streaming so the TUI's
-        // update_from_turn_state() sees the Idle → Streaming transition.
         let mut ts = self.state.state.lock();
-        ts.phase = TurnPhase::Streaming;
+        ts.on_turn_start();
     }
 
     fn on_post_turn(&self, response: &str, success: bool, _turn_count: u32) {

@@ -99,6 +99,7 @@ impl ConversationCoordinator for TuiCoordinator {
             session_name: None,
             message_count: msg_count,
         };
+        tracing::debug!("[TuiCoordinator] sending TurnCompletion: success={}, response_len={}", success, response.len());
         let _ = self.done_tx.send(completion);
 
         true

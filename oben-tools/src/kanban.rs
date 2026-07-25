@@ -26,6 +26,16 @@ pub struct KanbanTool;
 
 async fn execute_kanban<'a>(call: &ToolCall<'a>) -> anyhow::Result<oben_models::ToolResult> {
     let action = call.required_str("action")?;
+    
+    let valid_actions = ["create", "update", "move", "delete"];
+    if !valid_actions.contains(&action) {
+        return Ok(oben_models::ToolResult {
+            call_id: call.call_id.clone(),
+            output: String::new(),
+            error: Some(format!("Invalid action: '{}'. Must be one of: create, update, move, delete", action)),
+        });
+    }
+    
     let task_id = call.args.get("task_id").and_then(|v| v.as_str()).map(|s| s.to_string());
     let title = call.args.get("title").and_then(|v| v.as_str()).map(|s| s.to_string());
     let description = call.args.get("description").and_then(|v| v.as_str()).map(|s| s.to_string());

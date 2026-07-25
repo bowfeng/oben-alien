@@ -94,6 +94,8 @@ pub fn path_to_image_message(path: &str, prompt_text: &str) -> Option<(Message, 
             tool_calls: None,
             reasoning: None,
             delegation_id: None,
+            tool_error: false,
+            include_in_prompt: true,
         }
     } else {
         Message {
@@ -110,6 +112,8 @@ pub fn path_to_image_message(path: &str, prompt_text: &str) -> Option<(Message, 
             tool_calls: None,
             reasoning: None,
             delegation_id: None,
+            tool_error: false,
+            include_in_prompt: true,
         }
     };
 

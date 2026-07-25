@@ -7,7 +7,7 @@ use oben_models::{
     Message, MessageRole, ReasoningEffort, ToolMeta, TransportResponse, TransportToolCall,
 };
 use serde_json::json;
-use tracing::debug;
+use tracing::{debug, info};
 
 /// Mask base64 data URLs in log output to avoid exposing image data in logs.
 fn mask_data_urls(json_str: &str) -> String {
@@ -199,7 +199,7 @@ fn build_all_messages_json(messages: &[Message]) -> Vec<serde_json::Value> {
     // API errors like "System message must be at the beginning.".
     messages
         .iter()
-        .filter(|m| m.role != MessageRole::System)
+        .filter(|m| m.role != MessageRole::System && m.include_in_prompt)
         .map(message_to_json)
         .collect()
 }
@@ -208,8 +208,8 @@ fn build_all_messages_json(messages: &[Message]) -> Vec<serde_json::Value> {
 /// Returns the number of messages added.
 fn extend_messages_json(arr: &mut Vec<serde_json::Value>, messages: &[Message], from: usize) {
     for msg in &messages[from..] {
-        // Filter out system messages — same as build_all_messages_json
-        if msg.role != MessageRole::System {
+        // Filter out system messages and messages not intended for prompt — same as build_all_messages_json
+        if msg.role != MessageRole::System && msg.include_in_prompt {
             arr.push(message_to_json(msg));
         }
     }
@@ -275,7 +275,10 @@ where
 
             // Count non-system messages in current input (same as what
             // build_all_messages_json would produce).
-            let non_sys_count = messages.iter().filter(|m| m.role != MessageRole::System).count();
+            let non_sys_count = messages
+                .iter()
+                .filter(|m| m.role != MessageRole::System && m.include_in_prompt)
+                .count();
 
             if non_sys_count <= cached_count {
                 // Messages haven't grown — content was edited or removed.
@@ -781,9 +784,9 @@ impl oben_models::providers::TransportProvider for ChatCompletionsTransport {
         };
 
         let url = format!("{}/chat/completions", self.base.base_url);
-        debug!("Streaming request to {}", url);
+        info!("Streaming request to {}", url);
         let logged = mask_data_urls(&serde_json::to_string(&request).unwrap_or_default());
-        tracing::trace!("Stream prompt (truncated to 512 chars), messages={}", &logged[..logged.len().min(512)]);
+        info!("Stream prompt (truncated to 512 chars), messages={}", &logged[..logged.len().min(512)]);
 
         let mut req = self.base.client.post(&url).json(&request);
         if !self.base.api_key.is_empty() {

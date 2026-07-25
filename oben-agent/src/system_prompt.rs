@@ -454,6 +454,12 @@ pub fn build_system_prompt(
              you may delegate again with adjusted instructions.",
         );
     }
+    
+    tool_guidance.push(
+        "If a tool call fails, please consider other available tools or return the error information. \
+         Do not retry the same failing tool multiple times in a row.",
+    );
+    
     if !tool_guidance.is_empty() {
         parts.push("## Tool Usage Guidelines\n\n".to_string() + &tool_guidance.join("\n\n"));
     }

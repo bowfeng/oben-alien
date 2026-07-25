@@ -176,6 +176,9 @@ fn translate_messages(
     let mut contents: Vec<GeminiContentPart> = Vec::new();
 
     for msg in messages {
+        if !msg.include_in_prompt {
+            continue;
+        }
         match msg.role {
             MessageRole::System => {
                 let text = match &msg.content {

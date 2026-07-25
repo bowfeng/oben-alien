@@ -1,5 +1,6 @@
 use anyhow::Result;
 use crate::BuiltinTools;
+use blake3::Hasher;
 use oben_models::ToolResult;
 use serde_json::Value;
 /// Tool registry — stores and dispatches tool calls.
@@ -10,9 +11,12 @@ use serde_json::Value;
 /// structs that implement the trait, and the registry stores them as `Box<dyn
 /// Tool>`. Universal pre-checks (validation before dispatch) apply across all
 /// tools in `execute()`.
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tracing::{info, warn};
+use parking_lot::Mutex;
+
+pub type ToolCallHash = String;
 
 // ---------------------------------------------------------------------------
 // Tool trait — deep interface at the tool seam
@@ -165,9 +169,9 @@ pub struct SubagentResult {
 
 pub struct ToolRegistry {
     tools: HashMap<String, Box<dyn Tool>>,
-    /// Full tool definitions with parameters, stored alongside the trait objects.
-    /// Used by `list_tool_definitions()` to return complete specs to the LLM.
     tool_defs: HashMap<String, oben_models::ToolMeta>,
+    call_cache: Mutex<HashMap<ToolCallHash, ToolResult>>,
+    in_progress: Mutex<HashSet<ToolCallHash>>,
 }
 
 impl ToolRegistry {
@@ -175,19 +179,18 @@ impl ToolRegistry {
         Self {
             tools: HashMap::new(),
             tool_defs: HashMap::new(),
+            call_cache: Mutex::new(HashMap::new()),
+            in_progress: Mutex::new(HashSet::new()),
         }
     }
 
-    /// Register a basic tool without a full definition.
     pub fn register(&mut self, tool: Box<dyn Tool>) {
         info!("Registering tool: {}", tool.name());
         self.tools.insert(tool.name().to_string(), tool);
     }
 
-    /// Register a tool with its full definition (including parameters).
     pub fn register_with_def(&mut self, tool: Box<dyn Tool>, def: oben_models::ToolMeta) {
         let name = tool.name().to_string();
-        info!("Registering tool: {}", name);
         self.tools.insert(name.clone(), tool);
         self.tool_defs.insert(name, def);
     }
@@ -210,7 +213,43 @@ impl ToolRegistry {
         defs
     }
 
+    fn compute_call_hash(tool_name: &str, arguments: &Value) -> String {
+        let mut hasher = Hasher::new();
+        hasher.update(tool_name.as_bytes());
+        let args_str = arguments.to_string();
+        hasher.update(args_str.as_bytes());
+        hasher.finalize().to_hex().to_string()
+    }
+
     pub async fn execute(&self, tool_name: &str, arguments: &Value) -> ToolResult {
+        let call_hash = Self::compute_call_hash(tool_name, arguments);
+        
+        if self.in_progress.lock().contains(&call_hash) {
+            warn!("Tool call {:?} is already in progress, skipping duplicate", tool_name);
+            return ToolResult {
+                call_id: arguments.get("call_id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                output: String::new(),
+                error: Some(format!("Duplicate call in progress: {}", tool_name)),
+            };
+        }
+        
+        if let Some(cached) = self.call_cache.lock().get(&call_hash) {
+            return cached.clone();
+        }
+        
+        self.in_progress.lock().insert(call_hash.clone());
+        
+        let result = self.execute_inner(tool_name, arguments).await;
+        
+        self.in_progress.lock().remove(&call_hash);
+        if result.error.is_none() {
+            self.call_cache.lock().insert(call_hash, result.clone());
+        }
+        
+        result
+    }
+
+    async fn execute_inner(&self, tool_name: &str, arguments: &Value) -> ToolResult {
         info!("Executing tool: {} with args...", tool_name);
         let call = ToolCall::new(tool_name, arguments);
         match self.tools.get(tool_name) {

@@ -167,14 +167,24 @@ impl Agent {
                 } else {
                     response.as_ref().unwrap_err().to_string()
                 };
-                if !coordinator.on_turn_complete(turn_text.as_str(), msg_count, turn_count_v, turn_success) {
+                let is_error_content = turn_text.starts_with("Error:");
+                let turn_success_final = turn_success && !is_error_content;
+                tracing::debug!("[agent] calling coordinator.on_turn_complete: text_len={}, success={}", turn_text.len(), turn_success_final);
+                let cont = coordinator.on_turn_complete(turn_text.as_str(), msg_count, turn_count_v, turn_success_final);
+                tracing::debug!("[agent] coordinator.on_turn_complete returned: cont={}", cont);
+                if !cont {
                     me.hooks.emit_loop_end("user_exit");
                     return Ok(ConversationResult::Exit);
                 }
-                if turn_success {
+                if turn_success_final {
                     me.hooks.emit_turn_complete(turn_text.as_str(), turn_count_v, msg_count);
                 } else {
-                    me.hooks.emit_turn_error(&response.unwrap_err(), turn_count_v);
+                    let error = if response.is_err() {
+                        response.unwrap_err()
+                    } else {
+                        anyhow::anyhow!("{}", turn_text)
+                    };
+                    me.hooks.emit_turn_error(&error, turn_count_v);
                 }
                 turn_count += 1;
                 if let Some(max) = max_iterations {

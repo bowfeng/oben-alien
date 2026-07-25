@@ -27,6 +27,16 @@ async fn execute_cron_delivery<'a>(call: &ToolCall<'a>) -> anyhow::Result<oben_m
     let cron_expr = call.required_str("cron_expression")?;
     let message = call.required_str("message")?;
     
+    // Validate cron expression (basic check: at least 5 space-separated tokens)
+    let tokens: Vec<&str> = cron_expr.split_whitespace().collect();
+    if tokens.len() < 5 {
+        return Ok(oben_models::ToolResult {
+            call_id: call.call_id.clone(),
+            output: String::new(),
+            error: Some(format!("Invalid cron expression: '{}' (expected at least 5 space-separated fields)", cron_expr)),
+        });
+    }
+    
     let prompt = format!("cron: {} -> {}", cron_expr, message);
     let client = CronClient::new(None);
     let request = CronSubmitRequest {

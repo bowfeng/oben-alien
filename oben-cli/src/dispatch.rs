@@ -44,9 +44,9 @@ pub async fn run_cli() -> Result<()> {
         Commands::Chat {
             no_stream,
             continue_session,
-            search_provider: _,
-        } => run_chat(!no_stream, continue_session.as_deref(), profile).await,
-        Commands::Run { prompt, stream, search_provider: _ } => run_one_shot(&prompt, stream, profile).await,
+            search_provider: _, agent
+        } => run_chat(!no_stream, continue_session.as_deref(), profile, agent.as_deref()).await,
+        Commands::Run { prompt, stream, search_provider: _, agent } => run_one_shot(&prompt, stream, profile, agent.as_deref()).await,
         Commands::Setup => run_setup(profile),
         Commands::Config { action } => run_config(action, profile).await,
         Commands::Tools => list_tools(),
@@ -110,7 +110,7 @@ pub async fn run_cli() -> Result<()> {
 
 // ── Chat / Run ──────────────────────────────────────────────────────────
 
-async fn run_chat(stream: bool, continue_with: Option<&str>, profile: Option<&str>) -> Result<()> {
+async fn run_chat(stream: bool, continue_with: Option<&str>, profile: Option<&str>, agent: Option<&str>) -> Result<()> {
     info!("Starting interactive chat...");
 
     let config = oben_config::AppConfig::load(profile)?;
@@ -156,7 +156,7 @@ async fn run_chat(stream: bool, continue_with: Option<&str>, profile: Option<&st
         config.context.max_messages.unwrap_or(100),
         config.max_spawn_depth.unwrap_or(3),
         Arc::clone(&shared_hooks),
-        Some("default".to_string()),
+        agent.map(String::from),
     );
     let spawn_fn = build_spawn_fn_wrapper(spawner, assembled.prompt.clone());
     let mut tools_for_agent = ToolRegistry::clone(&tools);
@@ -170,6 +170,7 @@ async fn run_chat(stream: bool, continue_with: Option<&str>, profile: Option<&st
         .with_system_prompt(assembled.prompt.clone())
         .with_tools(Arc::new(tools_for_agent))
         .with_hooks(shared_hooks)
+        .with_agent_name(agent.map(String::from).or_else(|| Some("default".to_string())))
         .build()
         .await?;
 
@@ -197,7 +198,7 @@ async fn run_chat(stream: bool, continue_with: Option<&str>, profile: Option<&st
 
 
 
-async fn run_one_shot(prompt: &str, stream: bool, profile: Option<&str>) -> Result<()> {
+async fn run_one_shot(prompt: &str, stream: bool, profile: Option<&str>, agent: Option<&str>) -> Result<()> {
     let config = oben_config::AppConfig::load(profile)?;
 
     let mut tools = oben_tools::ToolRegistry::new();
@@ -224,7 +225,7 @@ async fn run_one_shot(prompt: &str, stream: bool, profile: Option<&str>) -> Resu
         config.context.max_messages.unwrap_or(100),
         config.max_spawn_depth.unwrap_or(3),
         Arc::clone(&shared_hooks),
-        Some("default".to_string()),
+        agent.map(String::from),
     );
     let spawn_fn = build_spawn_fn_wrapper(spawner, system_prompt.clone());
     let mut tools_for_agent = ToolRegistry::clone(&tools);
@@ -238,6 +239,7 @@ async fn run_one_shot(prompt: &str, stream: bool, profile: Option<&str>) -> Resu
         .with_system_prompt(system_prompt.clone())
         .with_tools(Arc::new(tools_for_agent))
         .with_hooks(shared_hooks)
+        .with_agent_name(        agent.map(String::from))
         .build()
         .await?;
 

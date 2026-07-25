@@ -16,6 +16,7 @@ use anyhow::Result;
 use serde_json::Value;
 use std::process::{Command, Stdio};
 use tracing::debug;
+use url::Url;
 
 use oben_models::{ToolMeta, ToolParameters, ToolResult};
 
@@ -214,6 +215,10 @@ fn is_safe_url(url: &str) -> bool {
     true
 }
 
+fn check_url_syntax(url: &str) -> Result<Url, String> {
+    Url::parse(url).map_err(|e| format!("Invalid URL syntax: {} (try http_get for raw text fetching)", e))
+}
+
 fn check_url_safety(url: &str) -> Option<String> {
     if !is_safe_url(url) {
         Some(format!("Blocked dangerous URL scheme: {}", url))
@@ -297,6 +302,14 @@ async fn handle_browser_navigate(args: &Value, call_id: String) -> Result<ToolRe
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("url parameter is required"))?;
     
+    if let Err(e) = check_url_syntax(url) {
+        return Ok(ToolResult {
+            call_id,
+            output: String::new(),
+            error: Some(e),
+        });
+    }
+    
     if let Some(blocked) = check_url_safety(url) {
         return Ok(ToolResult {
             call_id,
@@ -333,6 +346,14 @@ async fn handle_browser_snapshot(args: &Value, call_id: String) -> Result<ToolRe
     cmd_args.insert("maxElements".into(), max_elements.into());
     
     let (text, images) = run_agent_browser_command("snapshot", &Value::Object(cmd_args))?;
+    
+    if text.trim().is_empty() && images.is_empty() {
+        return Ok(ToolResult {
+            call_id,
+            output: String::new(),
+            error: Some("No DOM elements found on page".to_string()),
+        });
+    }
     
     let output = format!("{}{}", text, format_images(&images));
     

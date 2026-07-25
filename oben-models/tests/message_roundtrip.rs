@@ -56,6 +56,7 @@ fn message_with_image_content_roundtrip_json() {
         tool_calls: None,
         reasoning: None,
         delegation_id: None,
+        tool_error: false,
     };
     let json = serde_json::to_string(&msg).unwrap();
     let restored: Message = serde_json::from_str(&json).unwrap();
@@ -84,6 +85,7 @@ fn message_with_parts_roundtrip_json() {
         tool_calls: None,
         reasoning: None,
         delegation_id: None,
+        tool_error: false,
     };
     let json = serde_json::to_string(&msg).unwrap();
     let restored: Message = serde_json::from_str(&json).unwrap();

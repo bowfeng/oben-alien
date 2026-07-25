@@ -21,7 +21,12 @@ impl PromptBuilder {
     /// Build the messages array for the LLM API from a slice of messages.
     pub fn build_api_messages(&self, messages: &[Message]) -> Result<Vec<Message>> {
         let mut api_messages = vec![Message::system(self.system_prompt.clone())];
-        api_messages.extend(messages.iter().cloned());
+        api_messages.extend(
+            messages
+                .iter()
+                .filter(|m| m.include_in_prompt)
+                .cloned()
+        );
         Ok(api_messages)
     }
 

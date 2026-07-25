@@ -22,6 +22,9 @@ futures.workspace = true
 scraper = "0.18"
 urlencoding = "2.1"
 base64 = "0.22"
+blake3 = "1.5"
+parking_lot = "0.12"
+url = "2.5"
 chrono = { version = "0.4", features = ["serde"] }
 hound = "3.5"        # For WAV audio loading (used by whisper-rs)
 whisper-rs = { version = "0.16", optional = true, default-features = false }

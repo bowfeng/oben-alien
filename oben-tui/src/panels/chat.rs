@@ -163,19 +163,21 @@ impl ChatPanel {
             self.message_count = 0;
         }
 
-        self.prev_phase = current.clone();
-
         let drain_trigger = settled && transitioning && agent_idle && !self.drained_this_turn;
-        if settled || transitioning {
+        
+        // Only log INFO when phase changes to avoid 20 FPS spam
+        if current != self.prev_phase {
             tracing::info!(
                 "[chat_panel] update_from_turn_state: settled={}, transitioning={}, agent_idle={}, drained_this_turn={}, prev_phase={:?}, current_phase={:?}, drain={}",
-                settled, transitioning, agent_idle, self.drained_this_turn, prev, current, drain_trigger
+                settled, transitioning, agent_idle, self.drained_this_turn, self.prev_phase, current, drain_trigger
+            );
+        } else if settled || transitioning {
+            // Log DEBUG only for transitions/states that aren't repetitive
+            tracing::debug!(
+                "[chat_panel] update_from_turn_state: settled={}, transitioning={}, agent_idle={}, drained_this_turn={}, prev_phase={:?}, current_phase={:?}, drain={}",
+                settled, transitioning, agent_idle, self.drained_this_turn, self.prev_phase, current, drain_trigger
             );
         }
-        tracing::debug!(
-            "[chat_panel] update_from_turn_state: settled={}, transitioning={}, agent_idle={}, drained_this_turn={}, prev_phase={:?}, current_phase={:?}, drain={}",
-            settled, transitioning, agent_idle, self.drained_this_turn, prev, current, drain_trigger
-        );
 
         if drain_trigger {
             tracing::debug!(

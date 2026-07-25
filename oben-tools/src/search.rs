@@ -1,5 +1,3 @@
-use std::collections::HashSet;
-
 use super::registry::{Tool, ToolCall, ToolRegistry};
 use anyhow::anyhow;
 use oben_config::{SearchConfig, SearchProviderKind};
@@ -17,7 +15,12 @@ fn make_search_tool_def() -> ToolMeta {
 }
 
 pub fn create_search_provider(config: &SearchConfig) -> Box<dyn SearchProvider> {
+    if config.provider.is_disabled() {
+        return Box::new(DisabledProvider);
+    }
+
     match config.provider {
+        SearchProviderKind::Disabled => unreachable!(),
         SearchProviderKind::DuckDuckGo => Box::new(DuckDuckGoProvider::new()),
         SearchProviderKind::Brave => {
             let api_key = config.api_key.clone().unwrap_or_default();
@@ -36,6 +39,16 @@ pub fn create_search_provider(config: &SearchConfig) -> Box<dyn SearchProvider> 
 }
 
 #[derive(Debug, Clone)]
+pub struct DisabledProvider;
+
+#[async_trait::async_trait]
+impl SearchProvider for DisabledProvider {
+    async fn search(&self, _query: &str, _max_results: usize) -> anyhow::Result<Vec<SearchResult>> {
+        Err(anyhow::anyhow!("Search provider is disabled in config. Set search.provider to 'disabled' to disable web search."))
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct SearchResult {
     pub title: String,
     pub url: String,
@@ -48,6 +61,7 @@ pub trait SearchProvider: Send + Sync {
 }
 
 use reqwest::Client;
+use serde_json::Value;
 
 pub struct DuckDuckGoProvider {
     client: Client,
@@ -64,8 +78,9 @@ impl DuckDuckGoProvider {
 #[async_trait::async_trait]
 impl SearchProvider for DuckDuckGoProvider {
     async fn search(&self, query: &str, max_results: usize) -> anyhow::Result<Vec<SearchResult>> {
+        // Use DuckDuckGo's API endpoint instead of scraping HTML
         let url = format!(
-            "https://html.duckduckgo.com/html/?q={}",
+            "https://api.duckduckgo.com/?q={}&format=json&no_html=1",
             urlencoding::encode(query)
         );
 
@@ -73,38 +88,86 @@ impl SearchProvider for DuckDuckGoProvider {
 
         if !resp.status().is_success() {
             return Err(anyhow::anyhow!(
-                "DuckDuckGo search failed: HTTP {}",
+                "Error: web_search DuckDuckGo search failed: HTTP {}",
                 resp.status()
             ));
         }
 
-        let html = resp.text().await?;
+        let json: serde_json::Value = resp.json().await?;
 
-        let results = extract_ddg_results(&html, max_results);
+        // Parse results from the JSON response
+        let results = parse_ddg_results(&json, max_results);
+        
+        if results.is_empty() {
+            return Err(anyhow::anyhow!("Error: web_search cannot get results for query: {}", query));
+        }
 
         Ok(results)
     }
 }
 
-fn extract_ddg_results(html: &str, max_results: usize) -> Vec<SearchResult> {
+fn parse_ddg_results(json: &Value, max_results: usize) -> Vec<SearchResult> {
     let mut results = Vec::new();
-    let mut seen_urls = HashSet::new();
 
-    for line in html.lines() {
-        if line.contains("result__a") {
-            let title = extract_ddg_title(line);
-            let url = extract_ddg_url(line);
-
-            if !url.is_empty() && !seen_urls.contains(&url) {
-                seen_urls.insert(url.clone());
+    // Get results from Abstract, RelatedTopics, and Results fields
+    let abstract_title = json["Heading"].as_str().unwrap_or("").to_string();
+    if !abstract_title.is_empty() {
+        if let Some(abstract_text) = json["AbstractText"].as_str() {
+            if let Some(abstract_url) = json["AbstractURL"].as_str() {
                 results.push(SearchResult {
-                    title,
-                    url,
-                    snippet: String::new(),
+                    title: abstract_title,
+                    url: abstract_url.to_string(),
+                    snippet: abstract_text.to_string(),
                 });
-                if results.len() >= max_results {
-                    break;
+            }
+        }
+    }
+
+    // Parse RelatedTopics
+    if let Some(topics) = json["RelatedTopics"].as_array() {
+        for topic in topics {
+            if let Some(first_url) = topic["FirstURL"].as_str() {
+                let result = topic["Result"].as_str().unwrap_or("");
+                let text = topic["Text"].as_str().unwrap_or("");
+
+                // Extract title from result HTML
+                let title = extract_ddg_title_from_json(result);
+                let url = extract_ddg_url_from_json(first_url);
+
+                if !title.is_empty() && !url.is_empty() && !seen_url(&results, &url) {
+                    results.push(SearchResult {
+                        title,
+                        url,
+                        snippet: text.to_string(),
+                    });
                 }
+            }
+            if results.len() >= max_results {
+                break;
+            }
+        }
+    }
+
+    // Parse Results
+    if let Some(results_arr) = json["Results"].as_array() {
+        for result in results_arr {
+            if let Some(first_url) = result["FirstURL"].as_str() {
+                let result_text = result["Result"].as_str().unwrap_or("");
+                let text = result["Text"].as_str().unwrap_or("");
+
+                let title = extract_ddg_title_from_json(result_text);
+                let url = extract_ddg_url_from_json(first_url);
+
+                if !title.is_empty() && !url.is_empty() && !seen_url(&results, &url) {
+                    results.push(SearchResult {
+                        title,
+                        url,
+                        snippet: text.to_string(),
+                    });
+                }
+            }
+            if results.len() >= max_results {
+                break;
             }
         }
     }
@@ -112,30 +175,22 @@ fn extract_ddg_results(html: &str, max_results: usize) -> Vec<SearchResult> {
     results
 }
 
-fn extract_ddg_title(line: &str) -> String {
-    if let Some(start) = line.find('>') {
-        let end = line[start..].find("</a>").map(|i| start + i).unwrap_or(line.len());
-        let title = line[start..end].replace("<[^>]+>", "");
-        title.trim().to_string()
-    } else {
-        String::new()
-    }
+fn seen_url(results: &[SearchResult], url: &str) -> bool {
+    results.iter().any(|r| r.url == url)
 }
 
-fn extract_ddg_url(line: &str) -> String {
-    if let Some(start) = line.find("href=\"") {
-        let start = start + 6;
-        if let Some(end) = line[start..].find('"') {
-            let url = &line[start..start + end];
-            if url.starts_with("/l/?url=") {
-                if let Some(u) = url.split("url=").nth(1) {
-                    return urlencoding::decode(u).unwrap_or_default().to_string();
-                }
-            }
-            return urlencoding::decode(url).unwrap_or_default().to_string();
-        }
-    }
-    String::new()
+fn is_valid_result(r: &SearchResult) -> bool {
+    !r.title.is_empty() && !r.url.is_empty()
+}
+
+fn extract_ddg_title_from_json(text: &str) -> String {
+    // Remove HTML tags from JSON text
+    let cleaned = regex::Regex::new(r"<[^>]+>").unwrap().replace_all(text, "");
+    cleaned.trim().to_string()
+}
+
+fn extract_ddg_url_from_json(url: &str) -> String {
+    url.to_string()
 }
 
 pub struct BraveProvider {
@@ -328,7 +383,14 @@ async fn execute_web_search<'a>(tool: &WebSearchTool, call: &ToolCall<'a>) -> an
     let max_results = call.optional_u64("max_results", 5) as usize;
 
     if let Some(ref provider) = tool.provider {
-        let results = provider.search(query, max_results).await?;
+        let mut results = provider.search(query, max_results).await?;
+        
+        results.retain(is_valid_result);
+        
+        if results.is_empty() {
+            return Err(anyhow!("Error: web_search cannot get results for query: {}", query));
+        }
+        
         let output = results
             .iter()
             .enumerate()
@@ -342,7 +404,7 @@ async fn execute_web_search<'a>(tool: &WebSearchTool, call: &ToolCall<'a>) -> an
         });
     }
 
-    Err(anyhow!("No search provider configured. Add to config: `tools.search.provider`"))
+    Err(anyhow!("Error: web_search No search provider configured. Add to config: `tools.search.provider`"))
 }
 
 #[async_trait::async_trait]
@@ -422,6 +484,16 @@ mod config_tests {
         };
         let provider = create_search_provider(&config);
         let _ = provider;
+    }
+
+    #[test]
+    fn test_create_disabled_provider() {
+        let config = SearchConfig {
+            provider: SearchProviderKind::Disabled,
+            api_key: None,
+        };
+        let provider = create_search_provider(&config);
+        let _provider_ref: &dyn SearchProvider = provider.as_ref();
     }
 }
 

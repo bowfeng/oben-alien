@@ -259,6 +259,15 @@ async fn execute_web_extract<'a>(call: &ToolCall<'a>) -> anyhow::Result<ToolResu
 
     let (title, content) = extract_page(&html);
 
+    // Return error if no readable content found
+    if content.trim().is_empty() {
+        return Ok(ToolResult {
+            call_id: call.call_id.clone(),
+            output: String::new(),
+            error: Some(format!("No readable content found in {}", url)),
+        });
+    }
+
     Ok(ToolResult {
         call_id: call.call_id.clone(),
         output: if format_type == "markdown" {

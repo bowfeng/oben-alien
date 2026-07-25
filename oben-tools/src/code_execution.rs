@@ -52,6 +52,15 @@ async fn execute_code<'a>(call: &ToolCall<'a>) -> anyhow::Result<ToolResult> {
     let code = call.required_str("code")?;
     let timeout_secs = call.optional_u64("timeout", 30);
 
+    // SECURITY: Reject empty or whitespace-only code
+    if code.trim().is_empty() {
+        return Ok(ToolResult {
+            call_id: call.call_id.clone(),
+            output: String::new(),
+            error: Some("Code cannot be empty".to_string()),
+        });
+    }
+
     // Security check: block dangerous operations.
     let safe_code: String = code.chars().filter(|c| !c.is_ascii_whitespace()).collect();
 

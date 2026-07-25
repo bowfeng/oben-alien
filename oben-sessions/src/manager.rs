@@ -121,7 +121,9 @@ CREATE TABLE IF NOT EXISTS messages (
     reasoning_details TEXT,
     codex_reasoning_items TEXT,
     codex_message_items TEXT,
-    delegation_id INTEGER
+    delegation_id INTEGER,
+    tool_error INTEGER NOT NULL DEFAULT 0,
+    include_in_prompt INTEGER NOT NULL DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, timestamp);
 CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);
@@ -361,6 +363,8 @@ fn row_to_message(row: &rusqlite::Row) -> std::result::Result<Message, rusqlite:
     let id: Option<i64> = row.get("id").ok();
     let reasoning: Option<String> = row.get("reasoning").ok();
     let delegation_id: Option<i32> = row.get("delegation_id").ok();
+    let tool_error: i32 = row.get("tool_error").unwrap_or(0);
+    let include_in_prompt: i32 = row.get("include_in_prompt").unwrap_or(1);
     Ok(Message {
         role,
         content: oben_models::MessageContent::Text(content),
@@ -369,6 +373,8 @@ fn row_to_message(row: &rusqlite::Row) -> std::result::Result<Message, rusqlite:
         tool_calls,
         reasoning,
         delegation_id: delegation_id.map(|v| v as u32),
+        tool_error: tool_error != 0,
+        include_in_prompt: include_in_prompt != 0,
     })
 }
 
@@ -991,7 +997,7 @@ impl SessionDB {
         self.with_conn_mut(|conn| {
             // No nested transaction — with_conn_mut already manages BEGIN IMMEDIATE / COMMIT
             let mut stmt = conn.prepare(
-                "INSERT INTO messages (session_id, role, content, tool_calls, tool_call_id, timestamp, tool_name, reasoning, delegation_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) RETURNING id"
+                "INSERT INTO messages (session_id, role, content, tool_calls, tool_call_id, timestamp, tool_name, reasoning, delegation_id, tool_error) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) RETURNING id"
             )?;
             for msg in messages.iter_mut() {
                 let role = match msg.role {
@@ -1009,7 +1015,8 @@ impl SessionDB {
                 };
                 let reasoning = &msg.reasoning;
                 let delegation_id = msg.delegation_id;
-                let mut rows = stmt.query(params![session_id, role, content, tool_calls, tool_call_id, now_ts(), msg.tool_calls.as_ref().map(|_| "unknown"), reasoning, delegation_id])?;
+                let tool_error = if msg.tool_error { 1 } else { 0 };
+                let mut rows = stmt.query(params![session_id, role, content, tool_calls, tool_call_id, now_ts(), msg.tool_calls.as_ref().map(|_| "unknown"), reasoning, delegation_id, tool_error])?;
                 if let Some(row) = rows.next()? {
                     msg.id = Some(row.get(0)?);
                 }

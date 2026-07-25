@@ -26,6 +26,15 @@ pub struct ReadFileTool;
 async fn execute_read_file<'a>(call: &ToolCall<'a>) -> anyhow::Result<ToolResult> {
     let path = call.required_str("path")?;
 
+    let path_buf = PathBuf::from(path);
+    if !path_buf.exists() {
+        return Ok(ToolResult {
+            call_id: call.call_id.clone(),
+            output: String::new(),
+            error: Some(format!("File not found: {}", path)),
+        });
+    }
+
     if !is_path_safe(std::path::Path::new(path)) {
         return Ok(ToolResult {
             call_id: call.call_id.clone(),

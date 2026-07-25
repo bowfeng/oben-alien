@@ -484,6 +484,8 @@ mod tests {
             tool_calls: None,
             reasoning: None,
             delegation_id: None,
+            tool_error: false,
+            include_in_prompt: true,
         }
     }
 
@@ -570,6 +572,8 @@ mod tests {
             tool_calls: None,
             reasoning: None,
             delegation_id: None,
+            tool_error: false,
+            include_in_prompt: true,
         };
         let est = message_token_estimate(&msg);
         assert!(est > 0);
@@ -602,6 +606,8 @@ mod tests {
             tool_calls: None,
             reasoning: None,
             delegation_id: None,
+            tool_error: false,
+            include_in_prompt: true,
         }];
         let result = serialize_messages(&messages);
         assert!(result.contains("[TOOL]:"));

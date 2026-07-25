@@ -407,6 +407,8 @@ mod tests {
             tool_calls: None,
             reasoning: None,
             delegation_id: None,
+            tool_error: false,
+            include_in_prompt: true,
         }];
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()

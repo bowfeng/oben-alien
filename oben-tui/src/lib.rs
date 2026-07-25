@@ -345,12 +345,7 @@ pub async fn run_tui(session_name: Option<&str>, agent_name: Option<&str>) -> Re
                     TuiCommand::StartTurn { input, session_name: _ } => {
                         tracing::info!("[event_loop] TuiCommand::StartTurn, input.len={}, active_panel={:?}", input.len(), app.active_panel);
                         if let Some(chat) = app.get_chat_mut() {
-                            let entries_before = chat.message_state.message_entries.lock().unwrap().len();
-                            tracing::debug!("[event_loop] Clearing entries before: {}", entries_before);
                             chat.streaming = true;
-                            chat.clear_display();
-                            let entries_after_clear = chat.message_state.message_entries.lock().unwrap().len();
-                            tracing::debug!("[event_loop] After clear_display: {}", entries_after_clear);
                             chat.append_user_message(&input);
                             let count = chat.message_state.message_entries.lock().unwrap().len();
                             tracing::info!("[event_loop] After StartTurn, message_entries count={}", count);

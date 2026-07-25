@@ -22,6 +22,16 @@ pub struct McpClientTool;
 
 async fn execute_mcp_client<'a>(call: &ToolCall<'a>) -> anyhow::Result<oben_models::ToolResult> {
     let tool_name = call.required_str("tool_name")?;
+    
+    // Validate tool name is not empty
+    if tool_name.trim().is_empty() {
+        return Ok(oben_models::ToolResult {
+            call_id: call.call_id.clone(),
+            output: String::new(),
+            error: Some("tool_name cannot be empty".to_string()),
+        });
+    }
+    
     let arguments = call.args.get("arguments").and_then(|v| v.as_object()).cloned().unwrap_or_default();
     
     let args_json = serde_json::to_string(&arguments).unwrap_or_default();

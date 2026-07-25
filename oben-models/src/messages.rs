@@ -17,6 +17,9 @@ pub struct Message {
     pub reasoning: Option<String>,
     /// Numeric parent task ID for subagent tool result messages, used by the TUI to group subagent output into visual blocks.
     pub delegation_id: Option<u32>,
+    pub tool_error: bool,
+    #[serde(default)]
+    pub include_in_prompt: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -72,6 +75,8 @@ impl Message {
             tool_calls: None,
             reasoning: None,
             delegation_id: None,
+            tool_error: false,
+            include_in_prompt: true,
         }
     }
 
@@ -84,6 +89,8 @@ impl Message {
             tool_calls: None,
             reasoning: None,
             delegation_id: None,
+            tool_error: false,
+            include_in_prompt: true,
         }
     }
 
@@ -96,6 +103,8 @@ impl Message {
             tool_calls: Some(tool_calls),
             reasoning: None,
             delegation_id: None,
+            tool_error: false,
+            include_in_prompt: true,
         }
     }
 
@@ -108,6 +117,8 @@ impl Message {
             tool_calls: None,
             reasoning: None,
             delegation_id: None,
+            tool_error: false,
+            include_in_prompt: true,
         }
     }
 
@@ -120,6 +131,22 @@ impl Message {
             tool_calls: None,
             reasoning: None,
             delegation_id: None,
+            tool_error: false,
+            include_in_prompt: true,
+        }
+    }
+
+    pub fn tool_error_result(tool_call_id: impl Into<String>, error: impl Into<String>) -> Self {
+        Self {
+            role: MessageRole::Tool,
+            content: MessageContent::Text(error.into()),
+            id: None,
+            tool_call_ids: vec![tool_call_id.into()],
+            tool_calls: None,
+            reasoning: None,
+            delegation_id: None,
+            tool_error: true,
+            include_in_prompt: true,
         }
     }
 
@@ -128,8 +155,21 @@ impl Message {
         self
     }
 
+    pub fn set_include_in_prompt(mut self, include: bool) -> Self {
+        self.include_in_prompt = include;
+        self
+    }
+
     pub fn delegation_id(&self) -> Option<u32> {
         self.delegation_id
+    }
+
+    pub fn is_tool_error(&self) -> bool {
+        self.tool_error
+    }
+
+    pub fn is_included_in_prompt(&self) -> bool {
+        self.include_in_prompt
     }
 }
 
@@ -168,5 +208,16 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         let back: Message = serde_json::from_str(&json).unwrap();
         assert_eq!(back, msg);
+    }
+
+    #[test]
+    fn test_include_in_prompt_field() {
+        let msg = Message::user("test");
+        assert!(msg.include_in_prompt);
+        assert!(msg.is_included_in_prompt());
+
+        let msg = msg.set_include_in_prompt(false);
+        assert!(!msg.include_in_prompt);
+        assert!(!msg.is_included_in_prompt());
     }
 }

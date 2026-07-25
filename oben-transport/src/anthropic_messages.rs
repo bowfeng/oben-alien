@@ -681,7 +681,7 @@ where
             let cached_count = entry.msg_count;
             let non_system_msgs: Vec<&Message> = messages
                 .iter()
-                .filter(|m| m.role != MessageRole::System)
+                .filter(|m| m.role != MessageRole::System && m.include_in_prompt)
                 .collect();
 
             if non_system_msgs.len() <= cached_count {
@@ -1238,6 +1238,8 @@ mod tests {
             }]),
             reasoning: None,
             delegation_id: None,
+            tool_error: false,
+            include_in_prompt: true,
         };
         let result = message_to_anthropic_json(&msg);
         assert_eq!(result["role"], "assistant");

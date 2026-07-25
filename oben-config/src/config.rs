@@ -89,6 +89,7 @@ impl Default for MemoryConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum SearchProviderKind {
+    Disabled,
     DuckDuckGo,
     Brave,
     Bing,
@@ -98,6 +99,12 @@ pub enum SearchProviderKind {
 impl Default for SearchProviderKind {
     fn default() -> Self {
         SearchProviderKind::DuckDuckGo
+    }
+}
+
+impl SearchProviderKind {
+    pub fn is_disabled(&self) -> bool {
+        matches!(self, SearchProviderKind::Disabled)
     }
 }
 
@@ -1365,6 +1372,15 @@ mod multi_agent_tests {
         let restored: SearchConfig = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(restored.provider, SearchProviderKind::Brave);
         assert_eq!(restored.api_key, Some("test-key".to_string()));
+    }
+
+    #[test]
+    fn test_search_provider_disabled() {
+        let config = SearchConfig {
+            provider: SearchProviderKind::Disabled,
+            api_key: None,
+        };
+        assert!(config.provider.is_disabled());
     }
 
     #[test]
