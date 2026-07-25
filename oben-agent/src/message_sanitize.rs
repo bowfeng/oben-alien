@@ -36,6 +36,74 @@ pub fn sanitize_messages(messages: &mut Vec<Message>) {
 
     // Note: merge_consecutive_user_messages is also called after drop_thinking_only_assistant
     // on the history portion, since history messages may now have consecutive users.
+
+    // Merge consecutive assistant messages to prevent "2 assistant messages at end" error
+    merge_consecutive_assistant_messages(messages);
+}
+
+/// Merge assistant messages that are separated only by system messages.
+/// This prevents "2 assistant messages at end" API errors.
+fn merge_consecutive_assistant_messages(messages: &mut Vec<Message>) {
+    debug!("merge_consecutive_assistant_messages: called with {} messages", messages.len());
+    let before_count = messages.len();
+    
+    let mut merged: Vec<Message> = Vec::new();
+    
+    for msg in messages.iter().cloned() {
+        if msg.role == MessageRole::Assistant {
+            // Find the last assistant message (only if separated by system messages)
+            let mut last_assistant_idx = None;
+            for i in (0..merged.len()).rev() {
+                match merged[i].role {
+                    MessageRole::Assistant => {
+                        last_assistant_idx = Some(i);
+                        break;
+                    }
+                    MessageRole::System => {
+                        // Keep looking backwards for an assistant message
+                        continue;
+                    }
+                    _ => {
+                        // Non-system, non-assistant message found - stop looking
+                        break;
+                    }
+                }
+            }
+            
+            if let Some(last_idx) = last_assistant_idx {
+                // Merge with the last assistant message
+                let last = &mut merged[last_idx];
+                
+                // Merge tool_calls
+                if let Some(ref new_tcs) = msg.tool_calls {
+                    if let Some(ref mut last_tcs) = last.tool_calls {
+                        for tc in new_tcs.iter() {
+                            if !last_tcs.iter().any(|t| t.id == tc.id) {
+                                last_tcs.push(tc.clone());
+                            }
+                        }
+                    } else {
+                        last.tool_calls = Some(new_tcs.clone());
+                    }
+                }
+                // Merge content
+                let new_content = msg.content.to_text();
+                if !new_content.is_empty() {
+                    let last_content = last.content.to_text();
+                    last.content = MessageContent::Text(format!("{}\n{}", last_content, new_content));
+                }
+                continue;
+            }
+        }
+        merged.push(msg);
+    }
+    
+    *messages = merged;
+    
+    let after_count = messages.len();
+    if before_count != after_count {
+        debug!("merge_consecutive_assistant_messages: merged {} messages", before_count - after_count);
+    }
 }
 
 /// Drop assistant messages that are "thinking-only" — they have reasoning
@@ -101,6 +169,8 @@ fn flush_pending_user(merged: &mut Vec<Message>, pending_text: String) {
         tool_calls: None,
         reasoning: None,
         delegation_id: None,
+        tool_error: false,
+        include_in_prompt: true,
     });
 }
 
@@ -208,6 +278,8 @@ mod tests {
             tool_calls: None,
             reasoning: None,
             delegation_id: None,
+            tool_error: false,
+            include_in_prompt: true,
         }
     }
 
@@ -220,6 +292,8 @@ mod tests {
             tool_calls: Some(vec![]),
             reasoning: None,
             delegation_id: None,
+            tool_error: false,
+            include_in_prompt: true,
         }
     }
 
@@ -308,6 +382,8 @@ mod tests {
             tool_calls: None,
             reasoning: None,
             delegation_id: None,
+            tool_error: false,
+            include_in_prompt: true,
         };
 
         let text_msg = make_user("Hello");
@@ -338,6 +414,8 @@ mod tests {
             tool_calls: None,
             reasoning: None,
             delegation_id: None,
+            tool_error: false,
+            include_in_prompt: true,
         };
 
         let text_msg = make_user("先看这张");
@@ -372,6 +450,8 @@ mod tests {
             tool_calls: None,
             reasoning: None,
             delegation_id: None,
+            tool_error: false,
+            include_in_prompt: true,
         };
 
         let mut messages = vec![make_user("previous"), make_assistant("hello"), img_msg];
@@ -402,6 +482,8 @@ mod tests {
             tool_calls: None,
             reasoning: None,
             delegation_id: None,
+            tool_error: false,
+            include_in_prompt: true,
         };
 
         let mut messages = vec![
@@ -447,7 +529,7 @@ mod tests {
         let img_msg = Message {
             role: MessageRole::User,
             content: MessageContent::Image {
-                url: "data:image/png;base64,abc".into(),
+                url: "data:image/png;base64,abc123".into(),
                 detail: None,
             },
             id: None,
@@ -455,6 +537,8 @@ mod tests {
             tool_calls: None,
             reasoning: None,
             delegation_id: None,
+            tool_error: false,
+            include_in_prompt: true,
         };
 
         let text_msg1 = make_user("先");
@@ -535,5 +619,378 @@ mod tests {
 
         // Thinking-only dropped, others preserved
         assert_eq!(messages.len(), 3);
+    }
+
+    #[test]
+    fn test_merge_consecutive_assistant_messages() {
+        let mut messages = vec![
+            make_user("Hello"),
+            make_assistant("Response 1"),
+            make_assistant("Response 2"), // Should be merged with previous
+            make_user("Follow up"),
+        ];
+
+        merge_consecutive_assistant_messages(&mut messages);
+
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[1].role, MessageRole::Assistant);
+        let content = messages[1].content.to_text();
+        assert!(content.contains("Response 1"));
+        assert!(content.contains("Response 2"));
+    }
+
+    #[test]
+    fn test_merge_consecutive_assistant_messages_with_tools() {
+        let tool1 = oben_models::ToolCall {
+            id: "tool-1".to_string(),
+            tool_name: "test_tool".to_string(),
+            arguments: serde_json::json!({}),
+        };
+
+        let tool2 = oben_models::ToolCall {
+            id: "tool-2".to_string(),
+            tool_name: "test_tool".to_string(),
+            arguments: serde_json::json!({}),
+        };
+
+        let mut msg1 = make_assistant("Response 1");
+        msg1.tool_calls = Some(vec![tool1]);
+
+        let mut msg2 = make_assistant("Response 2");
+        msg2.tool_calls = Some(vec![tool2]);
+
+        let mut messages = vec![
+            make_user("Hello"),
+            msg1,
+            msg2, // Should be merged with previous, tool_calls combined
+            make_user("Follow up"),
+        ];
+
+        merge_consecutive_assistant_messages(&mut messages);
+
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[1].role, MessageRole::Assistant);
+        let content = messages[1].content.to_text();
+        assert!(content.contains("Response 1"));
+        assert!(content.contains("Response 2"));
+        // Tool calls should be combined
+        let tool_calls = messages[1].tool_calls.as_ref();
+        assert!(tool_calls.is_some());
+        assert_eq!(tool_calls.unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_merge_assistant_separated_by_system_message() {
+        // Test case 1: Two assistants separated by a system message
+        let mut messages = vec![
+            make_user("Hello"),
+            make_assistant("Response 1"),
+            make_system("System instruction"),
+            make_assistant("Response 2"),
+            make_user("Follow up"),
+        ];
+
+        merge_consecutive_assistant_messages(&mut messages);
+
+        // System message should remain but assistants should be merged
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[1].role, MessageRole::Assistant);
+        let content = messages[1].content.to_text();
+        assert!(content.contains("Response 1"));
+        assert!(content.contains("Response 2"));
+        assert_eq!(messages[2].role, MessageRole::System);
+    }
+
+    #[test]
+    fn test_merge_multiple_assistants_separated_by_system_messages() {
+        // Test case 2: Multiple assistants separated by system messages
+        let mut messages = vec![
+            make_user("Hello"),
+            make_assistant("Response 1"),
+            make_system("System instruction 1"),
+            make_assistant("Response 2"),
+            make_system("System instruction 2"),
+            make_assistant("Response 3"),
+            make_user("Follow up"),
+        ];
+
+        merge_consecutive_assistant_messages(&mut messages);
+
+        // All three assistants should be merged into one
+        // System messages remain at their original positions
+        // Final structure: [User, Assistant(merged), System, System, User]
+        assert_eq!(messages.len(), 5);
+        assert_eq!(messages[0].role, MessageRole::User);
+        assert_eq!(messages[1].role, MessageRole::Assistant);
+        let content = messages[1].content.to_text();
+        assert!(content.contains("Response 1"));
+        assert!(content.contains("Response 2"));
+        assert!(content.contains("Response 3"));
+        assert_eq!(messages[2].role, MessageRole::System);
+        assert_eq!(messages[2].content.to_text(), "System instruction 1");
+        assert_eq!(messages[3].role, MessageRole::System);
+        assert_eq!(messages[3].content.to_text(), "System instruction 2");
+        assert_eq!(messages[4].role, MessageRole::User);
+    }
+
+    #[test]
+    fn test_merge_consecutive_assistants_original_behavior() {
+        // Test case 3: Consecutive assistants (original behavior should still work)
+        let mut messages = vec![
+            make_user("Hello"),
+            make_assistant("Response 1"),
+            make_assistant("Response 2"),
+            make_assistant("Response 3"),
+            make_user("Follow up"),
+        ];
+
+        merge_consecutive_assistant_messages(&mut messages);
+
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[1].role, MessageRole::Assistant);
+        let content = messages[1].content.to_text();
+        assert!(content.contains("Response 1"));
+        assert!(content.contains("Response 2"));
+        assert!(content.contains("Response 3"));
+    }
+
+    #[test]
+    fn test_merge_assistants_with_tool_calls() {
+        // Test case 4: Assistants with tool_calls merging
+        let tool1 = oben_models::ToolCall {
+            id: "tool-1".to_string(),
+            tool_name: "web_search".to_string(),
+            arguments: serde_json::json!({"query": "weather"}),
+        };
+
+        let tool2 = oben_models::ToolCall {
+            id: "tool-2".to_string(),
+            tool_name: "file_read".to_string(),
+            arguments: serde_json::json!({"path": "/tmp/data.txt"}),
+        };
+
+        let tool3 = oben_models::ToolCall {
+            id: "tool-3".to_string(),
+            tool_name: "web_search".to_string(),
+            arguments: serde_json::json!({"query": "news"}),
+        };
+
+        let mut msg1 = make_assistant("I'll search the web");
+        msg1.tool_calls = Some(vec![tool1]);
+
+        let mut msg2 = make_assistant("Then I'll read the file");
+        msg2.tool_calls = Some(vec![tool2]);
+
+        let mut msg3 = make_assistant("Finally another web search");
+        msg3.tool_calls = Some(vec![tool3]);
+
+        let mut messages = vec![
+            make_user("Task"),
+            msg1,
+            make_system("You can do multiple tool calls"),
+            msg2,
+            make_system("Go ahead"),
+            msg3,
+            make_user("Complete"),
+        ];
+
+        merge_consecutive_assistant_messages(&mut messages);
+
+        // All three assistants merged into one
+        assert_eq!(messages.len(), 5);
+        assert_eq!(messages[1].role, MessageRole::Assistant);
+        
+        // Content should be combined
+        let content = messages[1].content.to_text();
+        assert!(content.contains("I'll search the web"));
+        assert!(content.contains("Then I'll read the file"));
+        assert!(content.contains("Finally another web search"));
+        
+        // Tool calls should be combined (3 unique tools)
+        let tool_calls = messages[1].tool_calls.as_ref();
+        assert!(tool_calls.is_some());
+        assert_eq!(tool_calls.unwrap().len(), 3);
+        
+        // Verify all tool IDs are present
+        let tool_ids: Vec<&str> = tool_calls.unwrap().iter().map(|t| t.id.as_str()).collect();
+        assert!(tool_ids.contains(&"tool-1"));
+        assert!(tool_ids.contains(&"tool-2"));
+        assert!(tool_ids.contains(&"tool-3"));
+    }
+
+    #[test]
+    fn test_merge_empty_assistant_with_tool_calls() {
+        // Test case 5: Empty assistant messages (content="") with tool_calls
+        let tool1 = oben_models::ToolCall {
+            id: "tool-1".to_string(),
+            tool_name: "web_search".to_string(),
+            arguments: serde_json::json!({"query": "weather"}),
+        };
+
+        let tool2 = oben_models::ToolCall {
+            id: "tool-2".to_string(),
+            tool_name: "file_read".to_string(),
+            arguments: serde_json::json!({"path": "/tmp/data.txt"}),
+        };
+
+        // Empty assistant (only tool calls)
+        let mut msg1 = Message {
+            role: MessageRole::Assistant,
+            content: MessageContent::Text(String::new()),
+            id: None,
+            tool_call_ids: vec![],
+            tool_calls: Some(vec![tool1]),
+            reasoning: None,
+            delegation_id: None,
+            tool_error: false,
+            include_in_prompt: true,
+        };
+
+        // Assistant with both text and tool calls
+        let mut msg2 = make_assistant("Processing...");
+        msg2.tool_calls = Some(vec![tool2]);
+
+        let mut messages = vec![
+            make_user("Task"),
+            msg1,
+            make_system("System message between"),
+            msg2,
+            make_user("Complete"),
+        ];
+
+        merge_consecutive_assistant_messages(&mut messages);
+
+        // Empty and non-empty assistants should be merged
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[1].role, MessageRole::Assistant);
+        
+        // Content should be combined (empty + non-empty)
+        let content = messages[1].content.to_text();
+        assert!(content.contains("Processing..."));
+        
+        // Tool calls should be combined
+        let tool_calls = messages[1].tool_calls.as_ref();
+        assert!(tool_calls.is_some());
+        assert_eq!(tool_calls.unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_merge_empty_content_only() {
+        // Test case: Assistants with empty content but non-empty tool calls
+        let tool1 = oben_models::ToolCall {
+            id: "tool-1".to_string(),
+            tool_name: "web_search".to_string(),
+            arguments: serde_json::json!({"query": "weather"}),
+        };
+
+        let tool2 = oben_models::ToolCall {
+            id: "tool-2".to_string(),
+            tool_name: "file_read".to_string(),
+            arguments: serde_json::json!({"path": "/tmp/data.txt"}),
+        };
+
+        let mut msg1 = Message {
+            role: MessageRole::Assistant,
+            content: MessageContent::Text(String::new()),
+            id: None,
+            tool_call_ids: vec![],
+            tool_calls: Some(vec![tool1]),
+            reasoning: None,
+            delegation_id: None,
+            tool_error: false,
+            include_in_prompt: true,
+        };
+
+        let mut msg2 = Message {
+            role: MessageRole::Assistant,
+            content: MessageContent::Text(String::new()),
+            id: None,
+            tool_call_ids: vec![],
+            tool_calls: Some(vec![tool2]),
+            reasoning: None,
+            delegation_id: None,
+            tool_error: false,
+            include_in_prompt: true,
+        };
+
+        let mut messages = vec![
+            make_user("Task"),
+            msg1,
+            make_system("System message"),
+            msg2,
+            make_user("Complete"),
+        ];
+
+        merge_consecutive_assistant_messages(&mut messages);
+
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[1].role, MessageRole::Assistant);
+        
+        // Content should remain empty (both were empty)
+        assert!(messages[1].content.to_text().is_empty());
+        
+        // Tool calls should be combined
+        let tool_calls = messages[1].tool_calls.as_ref();
+        assert!(tool_calls.is_some());
+        assert_eq!(tool_calls.unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_merge_assistants_not_merged_when_user_separates() {
+        // Assistant messages separated by user messages should NOT be merged
+        let mut messages = vec![
+            make_user("First"),
+            make_assistant("Response 1"),
+            make_user("Second question"), // User message separates them
+            make_assistant("Response 2"),
+            make_user("Third"),
+        ];
+
+        merge_consecutive_assistant_messages(&mut messages);
+
+        // Should remain 5 messages - assistants should NOT be merged
+        assert_eq!(messages.len(), 5);
+        assert_eq!(messages[1].role, MessageRole::Assistant);
+        assert_eq!(messages[1].content.to_text(), "Response 1");
+        assert_eq!(messages[3].role, MessageRole::Assistant);
+        assert_eq!(messages[3].content.to_text(), "Response 2");
+    }
+
+    #[test]
+    fn test_merge_assistants_not_merged_when_tool_separates() {
+        // Assistant messages separated by tool messages should NOT be merged
+        let mut msg1 = make_assistant("Using tool");
+        msg1.tool_calls = Some(vec![]);
+
+        let tool_msg = Message {
+            role: MessageRole::Tool,
+            content: MessageContent::Text("Tool result".to_string()),
+            id: None,
+            tool_call_ids: vec!["tool-1".to_string()],
+            tool_calls: None,
+            reasoning: None,
+            delegation_id: None,
+            tool_error: false,
+            include_in_prompt: true,
+        };
+
+        let mut msg2 = make_assistant("Another response");
+
+        let mut messages = vec![
+            make_user("First"),
+            msg1,
+            tool_msg,
+            msg2,
+            make_user("Second"),
+        ];
+
+        merge_consecutive_assistant_messages(&mut messages);
+
+        // Should remain 5 messages - assistants should NOT be merged
+        assert_eq!(messages.len(), 5);
+        assert_eq!(messages[1].role, MessageRole::Assistant);
+        assert_eq!(messages[1].content.to_text(), "Using tool");
+        assert_eq!(messages[3].role, MessageRole::Assistant);
+        assert_eq!(messages[3].content.to_text(), "Another response");
     }
 }
